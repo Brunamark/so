@@ -14,32 +14,57 @@ import exception.PermissaoException;
 public final class FileSystemImpl implements IFileSystem {
     private static final String ROOT_USER = "root";
     private Diretorio root;
-    private List<String> users = new ArrayList<>(); 
+    private List<String> users = new ArrayList<>();
 
     public FileSystemImpl() {
-        this.root = new Diretorio("root", "/");
+        this.root = new Diretorio(ROOT_USER, "/");
+        this.users.add(ROOT_USER);
     }
 
+    /**
+     * Cria um novo diretório no caminho especificado.
+     * 
+     * @param caminho Caminho onde o diretório será criado
+     * @param nome    Nome do novo diretório
+     * @throws CaminhoJaExistenteException Se já existir um diretório com o mesmo
+     *                                     nome
+     * @throws PermissaoException          Se o usuário não tiver permissão para
+     *                                     criar diretórios
+     */
     @Override
-    public void mkdir(String caminho, String nome)
+    public void mkdir(String caminho, String usuario)
             throws CaminhoJaExistenteException, PermissaoException {
+
+        if (caminho == null || caminho.isEmpty() || usuario == null || usuario.isEmpty()) {
+            throw new IllegalArgumentException("Caminho e usuário não podem ser nulos ou vazios");
+        }
+
+        if (!users.contains(usuario)) {
+            throw new PermissaoException("Usuário não existe: " + usuario);
+        }
+
         try {
-            Diretorio parent = navigateTo(caminho);
+            String[] pathParts = splitPath(caminho);
+            String parentPath = pathParts[0];
+            String nome = pathParts[1];
 
-            for (Diretorio dir : parent.getSubDiretorios()) {
-                if (dir.getMetadata().getName().equals(nome)) {
-                    throw new CaminhoJaExistenteException("Diretório já existe: " + nome);
-                }
+            if (nome.isEmpty()) {
+                throw new IllegalArgumentException("Nome do diretório não pode ser vazio");
             }
 
-            String owner = parent.getMetadata().getOwner();
-            String permission = parent.getMetadata().getPermissions().getOrDefault(owner, "");
+            Diretorio parent = navigateTo(parentPath);
 
-            if (!permission.contains("w")) {
-                throw new PermissaoException("Sem permissão de escrita no caminho: " + caminho);
+            if (encontrarSubdiretorio(parent, nome) != null) {
+                throw new CaminhoJaExistenteException("Diretório já existe: " + nome);
             }
 
-            Diretorio newDirectory = new Diretorio(owner, nome);
+            if (encontrarArquivo(parent, nome) != null) {
+                throw new CaminhoJaExistenteException("Já existe um arquivo com este nome: " + nome);
+            }
+
+            verificarPermissaoEscrita(usuario, parent);
+
+            Diretorio newDirectory = new Diretorio(usuario, nome);
             parent.addSubDiretorio(newDirectory);
 
         } catch (CaminhoNaoEncontradoException e) {
@@ -47,232 +72,405 @@ public final class FileSystemImpl implements IFileSystem {
         }
     }
 
+    /**
+     * Altera as permissões de um arquivo ou diretório.
+     * 
+     * @param caminho     Caminho do arquivo ou diretório
+     * @param usuario     Usuário que está alterando as permissões
+     * @param usuarioAlvo Usuário alvo das permissões
+     * @param permissao   Novas permissões
+     * @throws CaminhoNaoEncontradoException Se o caminho não existir
+     * @throws PermissaoException            Se o usuário não tiver permissão para
+     *                                       alterar permissões
+     */
     @Override
     public void chmod(String caminho, String usuario, String usuarioAlvo, String permissao)
             throws CaminhoNaoEncontradoException, PermissaoException {
-        Diretorio dir = navigateTo(caminho);
-        String userPermission = dir.getMetadata().getPermissions().getOrDefault(usuario, "");
 
-        if (!usuario.equals(ROOT_USER) && !userPermission.contains("rw")) {
+        validarParametros(caminho, usuario, usuarioAlvo, permissao);
+
+        verificarUsuario(usuario);
+        verificarUsuario(usuarioAlvo);
+
+        Diretorio dir = navigateTo(caminho);
+
+        if (!usuario.equals(ROOT_USER) && !usuario.equals(dir.getMetadata().getOwner())) {
             throw new PermissaoException("Somente root ou dono pode alterar permissões.");
+        }
+
+        for (char c : permissao.toCharArray()) {
+            if (c != 'r' && c != 'w' && c != 'x') {
+                throw new IllegalArgumentException("Permissão inválida: " + c + ". Use apenas r, w, x");
+            }
         }
 
         dir.getMetadata().getPermissions().put(usuarioAlvo, permissao);
     }
 
+    /**
+     * Remove um arquivo ou diretório.
+     * 
+     * @param caminho   Caminho do arquivo ou diretório a ser removido
+     * @param usuario   Usuário que está realizando a operação
+     * @param recursivo Se true, remove diretórios não vazios recursivamente
+     * @throws CaminhoNaoEncontradoException Se o caminho não existir
+     * @throws PermissaoException            Se o usuário não tiver permissão para
+     *                                       remover
+     */
     @Override
     public void rm(String caminho, String usuario, boolean recursivo)
             throws CaminhoNaoEncontradoException, PermissaoException {
-        String parentPath = caminho.substring(0, caminho.lastIndexOf("/"));
-        String nome = caminho.substring(caminho.lastIndexOf("/") + 1);
 
-        Diretorio parent = navigateTo(parentPath.isEmpty() ? "/" : parentPath);
+        validarParametros(caminho, usuario);
 
-        for (Arquivo arquivo : parent.getArquivos()) {
-            if (arquivo.getMetadata().getName().equals(nome)) {
-                String permission = parent.getMetadata().getPermissions().getOrDefault(usuario, "");
-                if (!permission.contains("w")) {
-                    throw new PermissaoException("Sem permissão para remover.");
-                }
-                parent.getArquivos().remove(arquivo);
-                return;
-            }
+        verificarUsuario(usuario);
+
+        if (caminho.equals("/")) {
+            throw new PermissaoException("Não é permitido remover o diretório raiz.");
         }
 
-        for (Diretorio sub : parent.getSubDiretorios()) {
-            if (sub.getMetadata().getName().equals(nome)) {
-                if (!recursivo && (!sub.getArquivos().isEmpty() || !sub.getSubDiretorios().isEmpty())) {
-                    throw new PermissaoException("Diretório não está vazio. Use rm recursivo.");
-                }
-                parent.getSubDiretorios().remove(sub);
-                return;
+        String[] pathParts = splitPath(caminho);
+        String parentPath = pathParts[0];
+        String nome = pathParts[1];
+
+        Diretorio parent = navigateTo(parentPath);
+
+        verificarPermissaoEscrita(usuario, parent);
+
+        Arquivo arquivo = encontrarArquivo(parent, nome);
+        if (arquivo != null) {
+            if (!usuario.equals(ROOT_USER) &&
+                    !usuario.equals(arquivo.getMetadata().getOwner()) &&
+                    !temPermissao(usuario, arquivo.getMetadata(), 'w')) {
+                throw new PermissaoException("Sem permissão para remover o arquivo: " + nome);
             }
+
+            parent.getArquivos().remove(arquivo);
+            return;
         }
 
-        throw new CaminhoNaoEncontradoException("Item não encontrado.");
+        Diretorio subDir = encontrarSubdiretorio(parent, nome);
+        if (subDir != null) {
+            if (!usuario.equals(ROOT_USER) &&
+                    !usuario.equals(subDir.getMetadata().getOwner()) &&
+                    !temPermissao(usuario, subDir.getMetadata(), 'w')) {
+                throw new PermissaoException("Sem permissão para remover o diretório: " + nome);
+            }
+
+            if (!recursivo && (!subDir.getArquivos().isEmpty() || !subDir.getSubDiretorios().isEmpty())) {
+                throw new PermissaoException("Diretório não está vazio. Use rm recursivo.");
+            }
+
+            parent.getSubDiretorios().remove(subDir);
+            return;
+        }
+
+        throw new CaminhoNaoEncontradoException("Item não encontrado: " + nome);
+
     }
 
+    /**
+     * Cria um novo arquivo vazio.
+     * 
+     * @param caminho Caminho completo do arquivo
+     * @param usuario Usuário que está criando o arquivo
+     * @throws CaminhoJaExistenteException Se já existir um arquivo com o mesmo nome
+     * @throws PermissaoException          Se o usuário não tiver permissão para
+     *                                     criar arquivos
+     */
     @Override
     public void touch(String caminho, String usuario) throws CaminhoJaExistenteException, PermissaoException {
-        String parentPath = caminho.substring(0, caminho.lastIndexOf('/'));
-        String fileName = caminho.substring(caminho.lastIndexOf('/') + 1);
+        validarParametros(caminho, usuario);
+
+        verificarUsuario(usuario);
+
+        String[] pathParts = splitPath(caminho);
+        String parentPath = pathParts[0];
+        String fileName = pathParts[1];
 
         try {
-            Diretorio parent = navigateTo(parentPath.isEmpty() ? "/" : parentPath);
+            Diretorio parent = navigateTo(parentPath);
 
-            for (Arquivo a : parent.getArquivos()) {
-                if (a.getMetadata().getName().equals(fileName)) {
-                    throw new CaminhoJaExistenteException("Arquivo já existe: " + fileName);
-                }
+            if (encontrarArquivo(parent, fileName) != null) {
+                throw new CaminhoJaExistenteException("Arquivo já existe: " + fileName);
             }
 
-            String permission = parent.getMetadata().getPermissions().getOrDefault(usuario, "");
-            if (!permission.contains("w")) {
-                throw new PermissaoException("Sem permissão de escrita no diretório.");
+            if (encontrarSubdiretorio(parent, fileName) != null) {
+                throw new CaminhoJaExistenteException("Já existe um diretório com este nome: " + fileName);
             }
+
+            verificarPermissaoEscrita(usuario, parent);
 
             Arquivo novo = new Arquivo(fileName, usuario);
             parent.addFile(novo);
 
         } catch (CaminhoNaoEncontradoException e) {
-            throw new PermissaoException("Caminho não encontrado.");
+            throw new PermissaoException("Caminho não encontrado: " + parentPath);
         }
+
     }
 
+    /**
+     * Escreve dados em um arquivo.
+     * 
+     * @param caminho Caminho do arquivo
+     * @param usuario Usuário que está escrevendo
+     * @param anexar  Se true, anexa os dados ao final do arquivo; se false,
+     *                sobrescreve
+     * @param buffer  Dados a serem escritos
+     * @throws CaminhoNaoEncontradoException Se o arquivo não existir
+     * @throws PermissaoException            Se o usuário não tiver permissão para
+     *                                       escrever
+     */
     @Override
     public void write(String caminho, String usuario, boolean anexar, byte[] buffer)
             throws CaminhoNaoEncontradoException, PermissaoException {
-        Diretorio dir = navigateTo(caminho.substring(0, caminho.lastIndexOf("/")));
-        String fileName = caminho.substring(caminho.lastIndexOf("/") + 1);
+        validarParametros(caminho, usuario, buffer);
 
-        for (Arquivo arquivo : dir.getArquivos()) {
-            if (arquivo.getMetadata().getName().equals(fileName)) {
-                String permission = arquivo.getMetadata().getPermissions().getOrDefault(usuario, "");
-                if (!permission.contains("w")) {
-                    throw new PermissaoException("Sem permissão de escrita no arquivo.");
-                }
+        verificarUsuario(usuario);
 
-                if (!anexar) {
-                    arquivo.getBlocos().clear();
-                    arquivo.getMetadata().setSize(0);
-                }
+        String[] pathParts = splitPath(caminho);
+        String parentPath = pathParts[0];
+        String fileName = pathParts[1];
 
-                Bloco bloco = new Bloco(buffer.length);
-                bloco.setDados(buffer);
-                arquivo.addBloco(bloco);
-                return;
-            }
+        Diretorio dir = navigateTo(parentPath);
+        Arquivo arquivo = encontrarArquivo(dir, fileName);
+
+        if (arquivo == null) {
+            throw new CaminhoNaoEncontradoException("Arquivo não encontrado: " + fileName);
         }
 
-        throw new CaminhoNaoEncontradoException("Arquivo não encontrado.");
+        if (!usuario.equals(ROOT_USER) &&
+                !usuario.equals(arquivo.getMetadata().getOwner()) &&
+                !temPermissao(usuario, arquivo.getMetadata(), 'w')) {
+            throw new PermissaoException("Sem permissão de escrita no arquivo: " + fileName);
+        }
+
+        if (!anexar) {
+            arquivo.getBlocos().clear();
+            arquivo.getMetadata().setSize(0);
+        }
+
+        Bloco bloco = new Bloco(buffer);
+        arquivo.addBloco(bloco);
     }
 
+    /**
+     * Lê dados de um arquivo.
+     * 
+     * @param caminho Caminho do arquivo
+     * @param usuario Usuário que está lendo
+     * @param buffer  Buffer onde os dados serão armazenados
+     * @throws CaminhoNaoEncontradoException Se o arquivo não existir
+     * @throws PermissaoException            Se o usuário não tiver permissão para
+     *                                       ler
+     */
     @Override
     public void read(String caminho, String usuario, byte[] buffer)
             throws CaminhoNaoEncontradoException, PermissaoException {
-        Diretorio dir = navigateTo(caminho.substring(0, caminho.lastIndexOf("/")));
-        String fileName = caminho.substring(caminho.lastIndexOf("/") + 1);
+        validarParametros(caminho, usuario, buffer);
 
-        for (Arquivo arquivo : dir.getArquivos()) {
-            if (arquivo.getMetadata().getName().equals(fileName)) {
-                String permission = arquivo.getMetadata().getPermissions().getOrDefault(usuario, "");
-                if (!permission.contains("r")) {
-                    throw new PermissaoException("Sem permissão de leitura no arquivo.");
-                }
+        verificarUsuario(usuario);
 
-                byte[] data = arquivo.read();
-                System.arraycopy(data, 0, buffer, 0, Math.min(data.length, buffer.length));
-                return;
-            }
+        String[] pathParts = splitPath(caminho);
+        String parentPath = pathParts[0];
+        String fileName = pathParts[1];
+
+        Diretorio dir = navigateTo(parentPath);
+        Arquivo arquivo = encontrarArquivo(dir, fileName);
+
+        if (arquivo == null) {
+            throw new CaminhoNaoEncontradoException("Arquivo não encontrado: " + fileName);
         }
 
-        throw new CaminhoNaoEncontradoException("Arquivo não encontrado.");
+        if (!usuario.equals(ROOT_USER) &&
+                !usuario.equals(arquivo.getMetadata().getOwner()) &&
+                !temPermissao(usuario, arquivo.getMetadata(), 'r')) {
+            throw new PermissaoException("Sem permissão de leitura no arquivo: " + fileName);
+        }
+
+        byte[] data = arquivo.read();
+        System.arraycopy(data, 0, buffer, 0, Math.min(data.length, buffer.length));
+
     }
 
+    /**
+     * Move um arquivo ou diretório para outro local.
+     * 
+     * @param caminhoAntigo Caminho original
+     * @param caminhoNovo   Novo caminho
+     * @param usuario       Usuário que está realizando a operação
+     * @throws CaminhoNaoEncontradoException Se o caminho original não existir
+     * @throws PermissaoException            Se o usuário não tiver permissão
+     */
     @Override
     public void mv(String caminhoAntigo, String caminhoNovo, String usuario)
             throws CaminhoNaoEncontradoException, PermissaoException {
-        String sourceParentPath = caminhoAntigo.substring(0, caminhoAntigo.lastIndexOf("/"));
-        String sourceName = caminhoAntigo.substring(caminhoAntigo.lastIndexOf("/") + 1);
+        validarParametros(caminhoAntigo, caminhoNovo, usuario);
 
-        String destParentPath = caminhoNovo.substring(0, caminhoNovo.lastIndexOf("/"));
-        String destName = caminhoNovo.substring(caminhoNovo.lastIndexOf("/") + 1);
+        verificarUsuario(usuario);
 
-        Diretorio sourceParent = navigateTo(sourceParentPath.isEmpty() ? "/" : sourceParentPath);
-        Diretorio destParent = navigateTo(destParentPath.isEmpty() ? "/" : destParentPath);
-
-        String sourcePermission = sourceParent.getMetadata().getPermissions().getOrDefault(usuario, "");
-        if (!sourcePermission.contains("w")) {
-            throw new PermissaoException("Sem permissão para mover do caminho: " + caminhoAntigo);
+        if (caminhoAntigo.equals("/")) {
+            throw new PermissaoException("Não é permitido mover o diretório raiz.");
         }
 
-        String destPermission = destParent.getMetadata().getPermissions().getOrDefault(usuario, "");
-        if (!destPermission.contains("w")) {
-            throw new PermissaoException("Sem permissão para mover para o caminho: " + caminhoNovo);
+        String[] sourcePathParts = splitPath(caminhoAntigo);
+        String sourceParentPath = sourcePathParts[0];
+        String sourceName = sourcePathParts[1];
+
+        String[] destPathParts = splitPath(caminhoNovo);
+        String destParentPath = destPathParts[0];
+        String destName = destPathParts[1];
+
+        Diretorio sourceParent = navigateTo(sourceParentPath);
+        Diretorio destParent = navigateTo(destParentPath);
+
+        verificarPermissaoEscrita(usuario, sourceParent);
+        verificarPermissaoEscrita(usuario, destParent);
+
+        if (encontrarArquivo(destParent, destName) != null) {
+            throw new PermissaoException("Já existe um arquivo com este nome no destino: " + destName);
         }
 
-        for (Arquivo arquivo : sourceParent.getArquivos()) {
-            if (arquivo.getMetadata().getName().equals(sourceName)) {
-                sourceParent.getArquivos().remove(arquivo);
-                arquivo.getMetadata().setName(destName);
-                destParent.addFile(arquivo);
-                return;
-            }
+        if (encontrarSubdiretorio(destParent, destName) != null) {
+            throw new PermissaoException("Já existe um diretório com este nome no destino: " + destName);
         }
 
-        for (Diretorio subDir : sourceParent.getSubDiretorios()) {
-            if (subDir.getMetadata().getName().equals(sourceName)) {
-                sourceParent.getSubDiretorios().remove(subDir);
-                subDir.getMetadata().setName(destName);
-                destParent.addSubDiretorio(subDir);
-                return;
-            }
+        Arquivo arquivo = encontrarArquivo(sourceParent, sourceName);
+        if (arquivo != null) {
+            sourceParent.getArquivos().remove(arquivo);
+            arquivo.getMetadata().setName(destName);
+            destParent.addFile(arquivo);
+            return;
+        }
+
+        Diretorio subDir = encontrarSubdiretorio(sourceParent, sourceName);
+        if (subDir != null) {
+            sourceParent.getSubDiretorios().remove(subDir);
+            subDir.getMetadata().setName(destName);
+            destParent.addSubDiretorio(subDir);
+            return;
         }
 
         throw new CaminhoNaoEncontradoException("Item não encontrado no caminho: " + caminhoAntigo);
-
     }
 
+    /**
+     * Lista o conteúdo de um diretório.
+     * 
+     * @param caminho   Caminho do diretório
+     * @param usuario   Usuário que está listando
+     * @param recursivo Se true, lista recursivamente os subdiretórios
+     * @throws CaminhoNaoEncontradoException Se o diretório não existir
+     * @throws PermissaoException            Se o usuário não tiver permissão para
+     *                                       listar
+     */
     @Override
     public void ls(String caminho, String usuario, boolean recursivo)
             throws CaminhoNaoEncontradoException, PermissaoException {
+        validarParametros(caminho, usuario);
+
+        verificarUsuario(usuario);
+
         Diretorio dir = navigateTo(caminho);
+
+        if (!usuario.equals(ROOT_USER) &&
+                !usuario.equals(dir.getMetadata().getOwner()) &&
+                !temPermissao(usuario, dir.getMetadata(), 'r')) {
+            throw new PermissaoException("Sem permissão de leitura no diretório: " + caminho);
+        }
+
         listarConteudo(dir, caminho, recursivo, 0);
     }
 
+    /**
+     * Copia um arquivo ou diretório.
+     * 
+     * @param caminhoOrigem  Caminho do arquivo ou diretório de origem
+     * @param caminhoDestino Caminho de destino
+     * @param usuario        Usuário que está copiando
+     * @param recursivo      Se true, copia diretórios recursivamente
+     * @throws CaminhoNaoEncontradoException Se o caminho de origem não existir
+     * @throws PermissaoException            Se o usuário não tiver permissão
+     */
     @Override
     public void cp(String caminhoOrigem, String caminhoDestino, String usuario, boolean recursivo)
             throws CaminhoNaoEncontradoException, PermissaoException {
-        String sourceParentPath = caminhoOrigem.substring(0, caminhoOrigem.lastIndexOf("/"));
-        String sourceName = caminhoOrigem.substring(caminhoOrigem.lastIndexOf("/") + 1);
+        validarParametros(caminhoOrigem, caminhoDestino, usuario);
 
-        String destParentPath = caminhoDestino.substring(0, caminhoDestino.lastIndexOf("/"));
-        String destName = caminhoDestino.substring(caminhoDestino.lastIndexOf("/") + 1);
+        verificarUsuario(usuario);
 
-        Diretorio sourceParent = navigateTo(sourceParentPath.isEmpty() ? "/" : sourceParentPath);
-        Diretorio destParent = navigateTo(destParentPath.isEmpty() ? "/" : destParentPath);
+        String[] sourcePathParts = splitPath(caminhoOrigem);
+        String sourceParentPath = sourcePathParts[0];
+        String sourceName = sourcePathParts[1];
 
-        String sourcePermission = sourceParent.getMetadata().getPermissions().getOrDefault(usuario, "");
-        if (!sourcePermission.contains("r")) {
-            throw new PermissaoException("Sem permissão para ler do caminho: " + caminhoOrigem);
+        String[] destPathParts = splitPath(caminhoDestino);
+        String destParentPath = destPathParts[0];
+        String destName = destPathParts[1];
+
+        Diretorio sourceParent = navigateTo(sourceParentPath);
+        Diretorio destParent = navigateTo(destParentPath);
+
+        if (!usuario.equals(ROOT_USER) && !temPermissao(usuario, sourceParent, 'r')) {
+            throw new PermissaoException("Sem permissão para ler do caminho: " + sourceParentPath);
         }
 
-        String destPermission = destParent.getMetadata().getPermissions().getOrDefault(usuario, "");
-        if (!destPermission.contains("w")) {
-            throw new PermissaoException("Sem permissão para escrever no caminho: " + caminhoDestino);
+        if (!usuario.equals(ROOT_USER) && !temPermissao(usuario, destParent, 'w')) {
+            throw new PermissaoException("Sem permissão para escrever no caminho: " + destParentPath);
         }
 
-        for (Arquivo arquivo : sourceParent.getArquivos()) {
-            if (arquivo.getMetadata().getName().equals(sourceName)) {
-                Arquivo novoArquivo = new Arquivo(destName, usuario);
-                novoArquivo.setBlocos(new ArrayList<>(arquivo.getBlocos())); 
-                destParent.addFile(novoArquivo);
-                return;
+        if (encontrarArquivo(destParent, destName) != null) {
+            throw new PermissaoException("Já existe um arquivo com este nome no destino: " + destName);
+        }
+
+        if (encontrarSubdiretorio(destParent, destName) != null) {
+            throw new PermissaoException("Já existe um diretório com este nome no destino: " + destName);
+        }
+
+        Arquivo arquivo = encontrarArquivo(sourceParent, sourceName);
+        if (arquivo != null) {
+            Arquivo novoArquivo = new Arquivo(destName, usuario);
+            novoArquivo.setBlocos(new ArrayList(arquivo.getBlocos()));
+            destParent.addFile(novoArquivo);
+            return;
+        }
+
+        Diretorio subDir = encontrarSubdiretorio(sourceParent, sourceName);
+        if (subDir != null) {
+            if (!recursivo) {
+                throw new PermissaoException("Cópia de diretório requer o modo recursivo.");
             }
-        }
-
-        for (Diretorio subDir : sourceParent.getSubDiretorios()) {
-            if (subDir.getMetadata().getName().equals(sourceName)) {
-                if (!recursivo) {
-                    throw new PermissaoException("Cópia de diretório requer o modo recursivo.");
-                }
-                Diretorio novoDiretorio = copyDiretorio(subDir, destName, usuario);
-                destParent.addSubDiretorio(novoDiretorio);
-                return;
-            }
+            Diretorio novoDiretorio = copyDiretorio(subDir, destName, usuario);
+            destParent.addSubDiretorio(novoDiretorio);
+            return;
         }
 
         throw new CaminhoNaoEncontradoException("Item não encontrado no caminho: " + caminhoOrigem);
+
     }
 
+    /**
+     * Adiciona um novo usuário ao sistema.
+     * 
+     * @param user Nome do usuário a ser adicionado
+     * @throws UnsupportedOperationException Se o usuário já existir
+     */
     public void addUser(String user) {
         if (users.contains(user)) {
             throw new UnsupportedOperationException("Usuário já existe: " + user);
         }
-        users.add(user);    
+        users.add(user);
     }
 
+    /**
+     * Navega até um diretório especificado pelo caminho.
+     * 
+     * @param path Caminho do diretório
+     * @return O diretório encontrado
+     * @throws CaminhoNaoEncontradoException Se o diretório não existir
+     */
     private Diretorio navigateTo(String path) throws CaminhoNaoEncontradoException {
+
         if (path.equals("/"))
             return root;
 
@@ -300,6 +498,14 @@ public final class FileSystemImpl implements IFileSystem {
         return current;
     }
 
+    /**
+     * Lista o conteúdo de um diretório.
+     * 
+     * @param dir       Diretório a ser listado
+     * @param caminho   Caminho do diretório
+     * @param recursivo Se true, lista recursivamente os subdiretórios
+     * @param nivel     Nível de indentação para a saída
+     */
     private void listarConteudo(Diretorio dir, String caminho, boolean recursivo, int nivel) {
         String indent = "  ".repeat(nivel);
         System.out.println(indent + "[DIR] " + dir.getMetadata().getName());
@@ -315,20 +521,176 @@ public final class FileSystemImpl implements IFileSystem {
         }
     }
 
+    /**
+     * Copia um diretório recursivamente.
+     * 
+     * @param source  Diretório de origem
+     * @param newName Novo nome para o diretório
+     * @param usuario Usuário que está copiando
+     * @return O novo diretório copiado
+     */
     private Diretorio copyDiretorio(Diretorio source, String newName, String usuario) {
         Diretorio novoDiretorio = new Diretorio(usuario, newName);
-    
+
         for (Arquivo arquivo : source.getArquivos()) {
             Arquivo novoArquivo = new Arquivo(arquivo.getMetadata().getName(), usuario);
-            novoArquivo.setBlocos(new ArrayList<>(arquivo.getBlocos())); 
+            novoArquivo.setBlocos(new ArrayList<>(arquivo.getBlocos()));
             novoDiretorio.addFile(novoArquivo);
         }
-    
+
         for (Diretorio subDir : source.getSubDiretorios()) {
             Diretorio novoSubDir = copyDiretorio(subDir, subDir.getMetadata().getName(), usuario);
             novoDiretorio.addSubDiretorio(novoSubDir);
         }
-    
+
         return novoDiretorio;
+    }
+
+    /**
+     * Verifica se um usuário existe.
+     * 
+     * @param usuario Nome do usuário
+     * @throws PermissaoException Se o usuário não existir
+     */
+    private void verificarUsuario(String usuario) throws PermissaoException {
+        if (!users.contains(usuario)) {
+            throw new PermissaoException("Usuário não existe: " + usuario);
+        }
+    }
+
+    /**
+     * Valida os parâmetros para evitar NullPointerException.
+     * 
+     * @param params Parâmetros a serem validados
+     * @throws IllegalArgumentException Se algum parâmetro for nulo
+     */
+    private void validarParametros(Object... params) {
+        for (int i = 0; i < params.length; i++) {
+            if (params[i] == null) {
+                throw new IllegalArgumentException("Parâmetro " + (i + 1) + " não pode ser nulo");
+            }
+            if (params[i] instanceof String && ((String) params[i]).trim().isEmpty()) {
+                throw new IllegalArgumentException("Parâmetro " + (i + 1) + " não pode ser vazio");
+            }
+        }
+    }
+
+    /**
+     * Divide um caminho em diretório pai e nome do item.
+     * 
+     * @param caminho Caminho completo
+     * @return Array com [diretório pai, nome do item]
+     */
+    private String[] splitPath(String caminho) {
+        if (caminho == null || caminho.isEmpty()) {
+            return new String[] { "/", "" };
+        }
+
+        int lastSlashIndex = caminho.lastIndexOf('/');
+        if (lastSlashIndex == -1) {
+            return new String[] { "/", caminho };
+        }
+
+        String parentPath = caminho.substring(0, lastSlashIndex);
+        String name = caminho.substring(lastSlashIndex + 1);
+
+        if (parentPath.isEmpty()) {
+            parentPath = "/";
+        }
+
+        return new String[] { parentPath, name };
+    }
+
+    /**
+     * Encontra um arquivo em um diretório pelo nome.
+     * 
+     * @param dir      Diretório onde procurar
+     * @param fileName Nome do arquivo
+     * @return O arquivo encontrado ou null se não existir
+     */
+    private Arquivo encontrarArquivo(Diretorio dir, String fileName) {
+        for (Arquivo arquivo : dir.getArquivos()) {
+            if (arquivo.getMetadata().getName().equals(fileName)) {
+                return arquivo;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Encontra um subdiretório em um diretório pelo nome.
+     * 
+     * @param dir     Diretório onde procurar
+     * @param dirName Nome do subdiretório
+     * @return O subdiretório encontrado ou null se não existir
+     */
+    private Diretorio encontrarSubdiretorio(Diretorio dir, String dirName) {
+        for (Diretorio subDir : dir.getSubDiretorios()) {
+            if (subDir.getMetadata().getName().equals(dirName)) {
+                return subDir;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Verifica se o usuário tem a permissão especificada em um diretório.
+     * 
+     * @param usuario   Nome do usuário
+     * @param diretorio Diretório a ser verificado
+     * @param permissao Caractere de permissão ('r', 'w' ou 'x')
+     * @return true se o usuário tem a permissão, false caso contrário
+     */
+    private boolean temPermissao(String usuario, Diretorio diretorio, char permissao) {
+        return temPermissao(usuario, diretorio.getMetadata(), permissao);
+    }
+
+    /**
+     * Verifica se o usuário tem a permissão especificada.
+     * 
+     * @param usuario   Nome do usuário
+     * @param metadata  Metadados do arquivo ou diretório
+     * @param permissao Caractere de permissão ('r', 'w' ou 'x')
+     * @return true se o usuário tem a permissão, false caso contrário
+     */
+    private boolean temPermissao(String usuario, Metadata metadata, char permissao) {
+        if (usuario.equals(ROOT_USER)) {
+            return true;
+        }
+
+        if (usuario.equals(metadata.getOwner())) {
+            return true;
+        }
+
+        String perms = metadata.getPermissions().getOrDefault(usuario, "");
+        return perms.contains(String.valueOf(permissao));
+    }
+
+    /**
+     * Verifica se o usuário tem permissão para escrever no diretório.
+     * 
+     * @param usuario Nome do usuário
+     * @param dir     Diretório a ser verificado
+     * @throws PermissaoException Se o usuário não tiver permissão de escrita
+     */
+    private void verificarPermissaoEscrita(String usuario, Diretorio dir) throws PermissaoException {
+        if (!temPermissao(usuario, dir.getMetadata(), 'w')) {
+            throw new PermissaoException("Usuário " + usuario + " não tem permissão de escrita em " +
+                    dir.getMetadata().getName());
+        }
+    }
+
+    /**
+     * Verifica se o usuário tem permissão para ler o diretório.
+     * 
+     * @param usuario Nome do usuário
+     * @param dir     Diretório a ser verificado
+     * @throws PermissaoException Se o usuário não tiver permissão de leitura
+     */
+    private void verificarPermissaoLeitura(String usuario, Diretorio dir) throws PermissaoException {
+        if (!temPermissao(usuario, dir.getMetadata(), 'r')) {
+            throw new PermissaoException("Usuário " + usuario + " não tem permissão de leitura em " +
+                    dir.getMetadata().getName());
+        }
     }
 }
