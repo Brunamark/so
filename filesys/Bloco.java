@@ -3,8 +3,8 @@ package filesys;
 public class Bloco {
     private byte[] dados;
 
-    public Bloco(byte[] size) {
-        this.dados = size;
+    public Bloco(byte[] dados) {
+        this.dados = dados;
     }
 
     public Bloco(int size) {
