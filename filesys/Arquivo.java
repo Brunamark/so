@@ -13,8 +13,7 @@ public class Arquivo {
 
     
     public Arquivo(String nomeArquivo, String usuario) {
-        metadata.setName(usuario);
-        metadata.setOwner(usuario);
+        this.metadata = new Metadata(nomeArquivo, usuario);
     }
 
     public void write(byte[] buffer, boolean append) throws PermissaoException {
@@ -22,7 +21,7 @@ public class Arquivo {
             throw new PermissaoException("User " + metadata.getOwner() + " doesn't have permission to write!");
         }
 
-        if (append) {
+        if (!append) {
             blocos.clear();
         }
 
