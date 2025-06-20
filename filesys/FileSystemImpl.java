@@ -96,19 +96,63 @@ public final class FileSystemImpl implements IFileSystem {
         verificarUsuario(usuario);
         verificarUsuario(usuarioAlvo);
 
-        Diretorio dir = navigateTo(caminho);
+        String[] pathParts = splitPath(caminho);
+        String parentPath = pathParts[0];
+        String itemName = pathParts[1];
 
-        if (!usuario.equals(ROOT_USER) && !usuario.equals(dir.getMetadata().getOwner())) {
-            throw new PermissaoException("Somente root ou dono pode alterar permissões.");
-        }
-
-        for (char c : permissao.toCharArray()) {
-            if (c != 'r' && c != 'w' && c != 'x') {
-                throw new IllegalArgumentException("Permissão inválida: " + c + ". Use apenas r, w, x");
+        // Se o caminho for a raiz
+        if (caminho.equals("/")) {
+            if (!usuario.equals(ROOT_USER)) {
+                throw new PermissaoException("Somente root pode alterar permissões da raiz.");
             }
+
+            // Validar permissões
+            for (char c : permissao.toCharArray()) {
+                if (c != 'r' && c != 'w' && c != 'x' && c != '-') {
+                    throw new IllegalArgumentException("Permissão inválida: " + c + ". Use apenas r, w, x ou -");
+                }
+            }
+
+            // Configurar permissões para a raiz
+            root.getMetadata().getPermissions().put(usuarioAlvo, permissao.replace("-", ""));
+            return;
         }
 
-        dir.getMetadata().getPermissions().put(usuarioAlvo, permissao);
+        Diretorio parent = navigateTo(parentPath);
+
+        Arquivo arquivo = encontrarArquivo(parent, itemName);
+        if (arquivo != null) {
+            if (!usuario.equals(ROOT_USER) && !usuario.equals(arquivo.getMetadata().getOwner())) {
+                throw new PermissaoException("Somente root ou dono pode alterar permissões.");
+            }
+
+            for (char c : permissao.toCharArray()) {
+                if (c != 'r' && c != 'w' && c != 'x' && c != '-') {
+                    throw new IllegalArgumentException("Permissão inválida: " + c + ". Use apenas r, w, x ou -");
+                }
+            }
+
+            arquivo.getMetadata().getPermissions().put(usuarioAlvo, permissao.replace("-", ""));
+            return;
+        }
+
+        Diretorio dir = encontrarSubdiretorio(parent, itemName);
+        if (dir != null) {
+            if (!usuario.equals(ROOT_USER) && !usuario.equals(dir.getMetadata().getOwner())) {
+                throw new PermissaoException("Somente root ou dono pode alterar permissões.");
+            }
+
+            for (char c : permissao.toCharArray()) {
+                if (c != 'r' && c != 'w' && c != 'x' && c != '-') {
+                    throw new IllegalArgumentException("Permissão inválida: " + c + ". Use apenas r, w, x ou -");
+                }
+            }
+
+            dir.getMetadata().getPermissions().put(usuarioAlvo, permissao.replace("-", ""));
+            return;
+        }
+
+        throw new CaminhoNaoEncontradoException("Item não encontrado: " + caminho);
     }
 
     /**
@@ -332,12 +376,14 @@ public final class FileSystemImpl implements IFileSystem {
         verificarPermissaoEscrita(usuario, sourceParent);
         verificarPermissaoEscrita(usuario, destParent);
 
-        if (encontrarArquivo(destParent, destName) != null) {
-            throw new PermissaoException("Já existe um arquivo com este nome no destino: " + destName);
+        Arquivo arquivoExistente = encontrarArquivo(destParent, destName);
+        if (arquivoExistente != null) {
+            destParent.getArquivos().remove(arquivoExistente);
         }
 
-        if (encontrarSubdiretorio(destParent, destName) != null) {
-            throw new PermissaoException("Já existe um diretório com este nome no destino: " + destName);
+        Diretorio dirExistente = encontrarSubdiretorio(destParent, destName);
+        if (dirExistente != null) {
+            destParent.getSubDiretorios().remove(dirExistente);
         }
 
         Arquivo arquivo = encontrarArquivo(sourceParent, sourceName);
@@ -357,6 +403,7 @@ public final class FileSystemImpl implements IFileSystem {
         }
 
         throw new CaminhoNaoEncontradoException("Item não encontrado no caminho: " + caminhoAntigo);
+
     }
 
     /**
