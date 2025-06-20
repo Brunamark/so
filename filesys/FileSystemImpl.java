@@ -43,6 +43,10 @@ public final class FileSystemImpl implements IFileSystem {
             throw new PermissaoException("Usuário não existe: " + usuario);
         }
 
+        if (caminho.equals("/")) {
+            return;
+        }
+
         try {
             String[] pathParts = splitPath(caminho);
             String parentPath = pathParts[0];
